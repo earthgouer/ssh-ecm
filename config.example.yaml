@@ -1,0 +1,79 @@
+# ssh-ecm 配置示例
+#
+# 用法：复制到 ~/.config/ssh-ecm/config.yaml（或 $SSH_ECM_CONFIG_DIR/config.yaml）后按实际情况修改。
+# 服务器清单在 servers.txt，与这里分开维护。
+#
+# api 下除 url/token_env/timeout 外都是可选项：
+# 全部不写 = 内置默认（GET {url}/servers/{目标}，从常见字段名里自动取 ip/端口/root 密码）。
+
+api:
+  url: https://ecm.example.com/api/v1   # 改成真实的 ECM API 地址
+  token_env: ECM_TOKEN                  # token 从该环境变量读取（export ECM_TOKEN=...）
+  timeout: 5s
+
+  # ---- 怎么调接口 ----
+  request:
+    method: POST                        # GET/POST/PUT/PATCH/DELETE，默认 GET
+    path: /server/detail                # 相对路径拼在 url 后面；写绝对 URL 则忽略 url
+    query:                              # 值支持 ${表达式}
+      from: ssh-ecm
+    headers:                            # 值支持 ${表达式}；这里也是唯一能读 env.* 的地方
+      Content-Type: application/json
+      X-Tenant: ${env.ECM_TENANT}
+    body: '{"server_id":"${meta.target}"}'   # 留空表示无 body
+
+  # ---- 业务成功判定（不写就只看 HTTP 状态码 + 内置的 code/success 字段）----
+  success:
+    path: code                          # 裸字段名 = data.code
+    equals: "0"                         # 省略则按 "0" 比较
+  error_message: msg                    # 失败时取这句话，省略则用内置候选键 msg/message/error...
+
+  # ---- 从响应 JSON 提取服务器信息（表达式；某个字段留空则该字段回退到自动识别）----
+  extract:
+    ip: data.data.ip                    # data.* 是响应原文，所以有 data 包装时要写两层
+    port: data.data.ssh_port
+    password: 'substr(data.data.root_password, 0, 8) + "@2026"'
+
+  # ---- --info 打印的行（写了就整体替换默认 8 行；不加 ${}）----
+  info:
+    rows:
+      - {label: 别名,     value: meta.alias}
+      - {label: ECM ID,   value: meta.target}
+      - {label: IP,       value: meta.ip}
+      - {label: 端口,     value: meta.port}
+      - {label: 跳板,     value: meta.jump}
+      - {label: 机房,     value: data.data.idc}
+      - {label: 备注,     value: meta.note}
+      - {label: root密码, value: meta.password}
+
+# 示例响应：
+#   {"code":0,"msg":"ok","data":{"id":"web-01","ip":"10.20.30.40","ssh_port":22,
+#                                "root_password":"Abc12345xyz","idc":"A 机房"}}
+# --info 结果：
+#   别名      web1
+#   ECM ID    web-01
+#   IP        10.20.30.40
+#   端口      22
+#   跳板      bastion (10.10.0.1:22)
+#   机房      A 机房
+#   备注      生产 web 前端
+#   root密码  Abc12345@2026
+
+defaults:
+  jump: bastion          # 默认跳板机别名；不需要默认跳板就删掉这行
+  port: 22
+
+jumps:
+  bastion:
+    host: 10.10.0.1
+    port: 22
+    user: myname
+    key: ~/.ssh/id_rsa   # 缺省用 ~/.ssh/id_rsa / id_ed25519 + ssh-agent
+
+# 说明：
+# 1) extract / info / success / error_message 里直接写表达式（例：meta.alias），不要加 ${}；
+#    ${} 只用于 request 的 path / query / headers / body。
+# 2) 表达式可用：data.*（响应 JSON，裸字段名等价于 data.字段名）、
+#    meta.*（alias/target/ip/port/jump/su/note/password）。
+# 3) 函数：substr/trim/upper/lower/replace/default/urlencode/urlescape。
+# 4) env.* 只在 request 里可用，extract/info 使用 env.* 会在加载配置时报错（防止 token 泄露到输出）。
