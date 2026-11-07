@@ -1,2 +1,7 @@
 dist/
 ssh-ecm-linux-*
+
+# testenv 运行时生成物
+testenv/run/
+testenv/env.sh
+testenv/config/known_hosts

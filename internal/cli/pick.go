@@ -16,7 +16,7 @@ import (
 // 交互式选单：
 //
 //	↑/↓ 或 j/k 移动，Home/End 跳首尾，Enter 连接；
-//	/ 进入过滤输入（别名/目标/su/跳板/备注 任意字段包含匹配，大小写不敏感）；
+//	/ 进入过滤输入（别名/目标/su/跳板/备注/标签 任意字段包含匹配，大小写不敏感）；
 //	q / Esc / Ctrl-C 退出。
 //
 // 实现约定：
@@ -45,8 +45,14 @@ type keyEvent struct {
 	r    rune
 }
 
+const (
+	pickerAliasW  = 14
+	pickerTargetW = 18
+	pickerSuW     = 6
+	pickerJumpW   = 12
+)
+
 type serverPicker struct {
-	cfg  *config.Config
 	all  []config.ServerEntry // 全量列表
 	list []config.ServerEntry // 过滤后可见列表
 
@@ -62,7 +68,7 @@ type serverPicker struct {
 }
 
 // pickServer 返回选中的别名；空字符串表示用户取消。
-func pickServer(cfg *config.Config, entries []config.ServerEntry) (string, error) {
+func pickServer(entries []config.ServerEntry) (string, error) {
 	if !xterm.IsTerminal(int(os.Stdin.Fd())) || !xterm.IsTerminal(int(os.Stdout.Fd())) {
 		return pickServerPlain(entries)
 	}
@@ -76,7 +82,7 @@ func pickServer(cfg *config.Config, entries []config.ServerEntry) (string, error
 	defer func() { _ = xterm.Restore(fd, oldState) }()
 
 	out := bufio.NewWriter(os.Stdout)
-	p := &serverPicker{cfg: cfg, all: entries, out: out}
+	p := &serverPicker{all: entries, out: out}
 	p.applyFilter()
 
 	out.WriteString("\033[?1049h\033[?25l") // 备用屏幕 + 隐藏光标
@@ -188,7 +194,7 @@ func (p *serverPicker) match(e config.ServerEntry) bool {
 	}
 	needle := strings.ToLower(string(p.filter))
 	haystack := strings.ToLower(strings.Join([]string{
-		e.Alias, e.Target, e.SuUser, jumpColumn(p.cfg, e), e.Note,
+		e.Alias, e.Target, e.SuUser, jumpColumn(e), e.Note, e.TagsText(),
 	}, " "))
 	return strings.Contains(haystack, needle)
 }
@@ -260,7 +266,7 @@ func (p *serverPicker) render() {
 		// 行宽留 1 列，避免写满整行触发终端"待换行"状态导致多出空行。
 		p.width--
 	}
-	rows := p.height - 4 // 标题 + 过滤行 + 空行 + 底部提示
+	rows := p.height - 5 // 标题 + 表头 + 过滤行 + 空行 + 底部提示
 	if rows < 3 {
 		rows = 3
 	}
@@ -277,6 +283,11 @@ func (p *serverPicker) render() {
 		b.WriteString(strconv.Itoa(len(p.list)))
 	}
 	b.WriteString(" 台\r\n")
+
+	// 列头：让用户知道每一列代表什么。
+	b.WriteString("\033[2m")
+	b.WriteString(p.formatHeader())
+	b.WriteString("\033[0m\r\n")
 
 	// 过滤行：处于输入状态或有过滤词时显示，占掉原来那一行空行。
 	if p.filtering || len(p.filter) > 0 {
@@ -308,7 +319,7 @@ func (p *serverPicker) render() {
 		b.WriteString("\r\n")
 	}
 	if p.filtering {
-		b.WriteString("\033[2m输入关键字过滤（别名/目标/su/跳板/备注）   Enter 连接   Esc 清除   ⌫ 删除\033[0m")
+		b.WriteString("\033[2m输入关键字过滤（别名/目标/su/跳板/备注/标签）   Enter 连接   Esc 清除   ⌫ 删除\033[0m")
 	} else {
 		b.WriteString("\033[2m↑/↓ 或 j/k 移动   / 过滤   Enter 连接   第 ")
 		b.WriteString(strconv.Itoa(p.cursor + 1))
@@ -341,6 +352,22 @@ func (p *serverPicker) clampWindow(rows int) {
 	}
 }
 
+func (p *serverPicker) formatHeader() string {
+	parts := []string{
+		"  ",
+		fitWidth("别名", pickerAliasW), " ",
+		fitWidth("目标", pickerTargetW), " ",
+		fitWidth("su", pickerSuW), " ",
+		fitWidth("跳板", pickerJumpW), " ",
+	}
+	used := 2 + pickerAliasW + 1 + pickerTargetW + 1 + pickerSuW + 1 + pickerJumpW + 1
+
+	if noteWidth := p.width - used; noteWidth >= 8 {
+		parts = append(parts, fitWidth("备注", noteWidth))
+	}
+	return fitWidth(strings.Join(parts, ""), p.width)
+}
+
 func (p *serverPicker) formatRow(i int) string {
 	e := p.list[i]
 	prefix := "  "
@@ -354,15 +381,15 @@ func (p *serverPicker) formatRow(i int) string {
 
 	parts := []string{
 		prefix,
-		fitWidth(e.Alias, 14), " ",
-		fitWidth(e.Target, 18), " ",
-		fitWidth(su, 6), " ",
-		fitWidth(jumpColumn(p.cfg, e), 12), " ",
+		fitWidth(e.Alias, pickerAliasW), " ",
+		fitWidth(e.Target, pickerTargetW), " ",
+		fitWidth(su, pickerSuW), " ",
+		fitWidth(jumpColumn(e), pickerJumpW), " ",
 	}
-	used := 2 + 14 + 1 + 18 + 1 + 6 + 1 + 12 + 1
+	used := 2 + pickerAliasW + 1 + pickerTargetW + 1 + pickerSuW + 1 + pickerJumpW + 1
 
 	if noteWidth := p.width - used; noteWidth >= 8 {
-		parts = append(parts, fitWidth(e.Note, noteWidth))
+		parts = append(parts, fitWidth(entryNote(e), noteWidth))
 	}
 	return fitWidth(strings.Join(parts, ""), p.width)
 }
@@ -378,7 +405,7 @@ func terminalSize() (int, int) {
 // pickServerPlain 是非终端环境的退化形态：打印编号，读一行输入。
 func pickServerPlain(entries []config.ServerEntry) (string, error) {
 	for i, e := range entries {
-		extra := e.Note
+		extra := entryNote(e)
 		if extra == "" {
 			extra = "-"
 		}
@@ -399,6 +426,18 @@ func pickServerPlain(entries []config.ServerEntry) (string, error) {
 		return "", fmt.Errorf("无效的选择：%q", line)
 	}
 	return entries[idx-1].Alias, nil
+}
+
+// entryNote 把备注和标签合成一列展示，标签放在方括号里。
+func entryNote(e config.ServerEntry) string {
+	note := e.Note
+	if tags := e.TagsText(); tags != "" {
+		if note != "" {
+			note += " "
+		}
+		note += "[" + tags + "]"
+	}
+	return note
 }
 
 // fitWidth 把字符串按显示宽度裁剪/补齐（中文占 2 列），用于表格对齐。

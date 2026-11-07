@@ -11,7 +11,7 @@ func newCompletionCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "completion [bash]",
 		Short: "输出 shell 补全脚本（bash）",
-		Long: `输出 bash 补全脚本。加入 ~/.bashrc 后，ssh-ecm <TAB> 会补全 servers.txt 里的别名：
+		Long: `输出 bash 补全脚本。加入 ~/.bashrc 后，ssh-ecm <TAB> 会补全 servers.csv 里的别名：
 
   source <(ssh-ecm completion bash)`,
 		Args:      cobra.ExactArgs(1),

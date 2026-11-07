@@ -1,7 +1,7 @@
 # ssh-ecm 配置示例
 #
 # 用法：复制到 ~/.config/ssh-ecm/config.yaml（或 $SSH_ECM_CONFIG_DIR/config.yaml）后按实际情况修改。
-# 服务器清单在 servers.txt，与这里分开维护。
+# 服务器清单在 servers.csv，与这里分开维护。
 #
 # api 下除 url/token_env/timeout 外都是可选项：
 # 全部不写 = 内置默认（GET {url}/servers/{目标}，从常见字段名里自动取 ip/端口/root 密码）。
@@ -60,7 +60,6 @@ api:
 #   root密码  Abc12345@2026
 
 defaults:
-  jump: bastion          # 默认跳板机别名；不需要默认跳板就删掉这行
   port: 22
 
 jumps:
@@ -69,6 +68,7 @@ jumps:
     port: 22
     user: myname
     key: ~/.ssh/id_rsa   # 缺省用 ~/.ssh/id_rsa / id_ed25519 + ssh-agent
+    password_env: BASTION_PASSWORD  # 跳板机只允许密码登录时用；不配则在终端提示输入（不回显）
 
 # 说明：
 # 1) extract / info / success / error_message 里直接写表达式（例：meta.alias），不要加 ${}；

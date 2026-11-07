@@ -1,7 +1,7 @@
 // Package config 负责 ssh-ecm 的配置加载：
 //
-//	~/.config/ssh-ecm/config.yaml    全局项（API、默认跳板、跳板机定义）
-//	~/.config/ssh-ecm/servers.txt    服务器清单（行式，Excel 友好）
+//	~/.config/ssh-ecm/config.yaml    全局项（API、默认端口、跳板机定义）
+//	~/.config/ssh-ecm/servers.csv    服务器清单（CSV，带表头，Excel 友好）
 //	~/.config/ssh-ecm/known_hosts    TOFU 主机指纹
 //
 // 目录可用 SSH_ECM_CONFIG_DIR 覆盖，便于多套配置/测试切换。
@@ -198,8 +198,7 @@ func (a *APIConfig) validate() error {
 
 // DefaultsConfig 对应 config.yaml 的 defaults 段。
 type DefaultsConfig struct {
-	Jump string `yaml:"jump"`
-	Port int    `yaml:"port"`
+	Port int `yaml:"port"`
 }
 
 // JumpConfig 是一台跳板机的定义。
@@ -209,6 +208,9 @@ type JumpConfig struct {
 	Port int    `yaml:"port"`
 	User string `yaml:"user"`
 	Key  string `yaml:"key"`
+	// PasswordEnv 指定存放跳板机密码的环境变量名。不配时，如果跳板机只允许密码登录，
+	// 工具会在公钥认证失败后于终端提示输入（不回显、不落盘）。
+	PasswordEnv string `yaml:"password_env"`
 }
 
 // AliasConfig 是 config.yaml 里兼容保留的 aliases 段条目。
@@ -228,21 +230,22 @@ type Config struct {
 	Jumps    map[string]JumpConfig  `yaml:"jumps"`
 	Aliases  map[string]AliasConfig `yaml:"aliases"`
 
-	// Servers 由 LoadServers 填充（servers.txt 解析结果），不来自 YAML。
+	// Servers 由 LoadServers 填充（servers.csv 解析结果），不来自 YAML。
 	Servers []ServerEntry `yaml:"-"`
 }
 
 // Target 是"别名/命令行目标"解析后的结果。
 type Target struct {
-	Alias     string // 命中的别名（未命中时等于用户输入）
-	IDOrIP    string // 交给 ECM API 的查询键：ECM ID 或 IPv4
-	Port      int    // 0 = 稍后按 API/配置/22 决定
-	SuUser    string // 登录后 su - <user>；空表示不切换
-	NoSu      bool   // servers.txt 里 su 列写了 "-"（显式不切换）
-	JumpAlias string // 跳板别名（已合并 defaults.jump）
-	NoJump    bool   // 强制直连（servers.txt 跳板列写了 "-"，或 --no-jump）
-	Note      string
-	Source    string // 该条目的来源描述，用于 -v / 报错
+	Alias        string // 命中的别名（未命中时等于用户输入）
+	IDOrIP       string // 交给 ECM API 的查询键：ECM ID 或 IPv4
+	Port         int    // 0 = 稍后按 API/配置/22 决定
+	PortExplicit bool   // servers.csv 显式写了 port，优先于 ECM 返回值
+	SuUser       string // 登录后 su - <user>；空表示不切换
+	NoSu         bool   // servers.csv 里 su 列写了 "-"（显式不切换）
+	JumpAlias    string // 跳板别名；空 = 直连
+	NoJump       bool   // 强制直连（servers.csv 跳板列写了 "-"，或 --no-jump）
+	Note         string
+	Source       string // 该条目的来源描述，用于 -v / 报错
 }
 
 // ConfigDir 返回配置目录：$SSH_ECM_CONFIG_DIR 或 ~/.config/ssh-ecm。
@@ -263,8 +266,8 @@ func ConfigDir() string {
 // ConfigPath 返回 config.yaml 绝对路径。
 func ConfigPath() string { return filepath.Join(ConfigDir(), "config.yaml") }
 
-// ServersPath 返回 servers.txt 绝对路径。
-func ServersPath() string { return filepath.Join(ConfigDir(), "servers.txt") }
+// ServersPath 返回 servers.csv 绝对路径。
+func ServersPath() string { return filepath.Join(ConfigDir(), "servers.csv") }
 
 // KnownHostsPath 返回本工具专用的 known_hosts 路径。
 func KnownHostsPath() string { return filepath.Join(ConfigDir(), "known_hosts") }
@@ -282,7 +285,7 @@ func EnsureDir() error {
 	return nil
 }
 
-const configTemplate = `# ssh-ecm 全局配置（服务器清单请编辑同目录下的 servers.txt）
+const configTemplate = `# ssh-ecm 全局配置（服务器清单请编辑同目录下的 servers.csv）
 api:
   url: https://ecm.example.com/api/v1   # 改成真实的 ECM API 地址
   token_env: ECM_TOKEN                  # token 从该环境变量读取（export ECM_TOKEN=...）
@@ -329,7 +332,6 @@ api:
   # 例：password: substr(data.root_password, 0, 8) + "@2026"
 
 defaults:
-  # jump: bastion                       # 默认跳板机别名；不需要默认跳板就保持注释
   port: 22
 
 jumps:
@@ -338,17 +340,20 @@ jumps:
   #   port: 22
   #   user: myname
   #   key: ~/.ssh/id_rsa                # 缺省用 ~/.ssh/id_rsa / id_ed25519 + ssh-agent
+  #   password_env: BASTION_PASSWORD    # 跳板机只允许密码登录时用（不配则在终端提示输入）
 `
 
-const serversTemplate = `# 别名	目标(ECM ID 或 IP)	su用户	跳板	备注
-# 一行一台，Tab 分隔（可直接从 Excel 复制粘贴）；# 开头的整行是注释
-# 第 3 列留空 = 不切换用户，写 - = 显式不切换
-# 第 4 列留空 = 用 config.yaml 的 defaults.jump，写 - = 强制直连
-# 示例：
-# web1	10.20.30.40	app	bastion	生产 web 前端
+const serversTemplate = `# ssh-ecm 服务器清单（CSV，带表头；可直接用 Excel 编辑）
+# 列：alias,target,su,jump,port,note,tags
+# su 留空 = 不切换用户，写 - = 显式不切换
+# jump 留空或写 - = 直连；要走跳板写 jumps 里的别名
+# port 留空 = 用 ECM 返回/默认端口，写了则优先于 ECM 返回值
+# tags 多个用 ; 分隔，例如 prod;web
+alias,target,su,jump,port,note,tags
+# 示例：web1,10.20.30.40,app,bastion,22,生产 web 前端,prod;web
 `
 
-// EnsureServersFile 首次运行创建 servers.txt（已存在则不动）。
+// EnsureServersFile 首次运行创建 servers.csv（已存在则不动）。
 func EnsureServersFile() error {
 	if err := EnsureDir(); err != nil {
 		return err
@@ -417,7 +422,7 @@ func Load(cfgPath string) (*Config, error) {
 	return cfg, nil
 }
 
-// LoadServersInto 解析 servers.txt 并填充到 c.Servers。
+// LoadServersInto 解析 servers.csv 并填充到 c.Servers。
 func (c *Config) LoadServersInto() error {
 	entries, err := LoadServers(ServersPath())
 	if err != nil {
@@ -427,7 +432,8 @@ func (c *Config) LoadServersInto() error {
 	return nil
 }
 
-// ResolveTarget 解析目标（别名 → 目标字段），并按 servers.txt 单行 + config defaults 合并。
+// ResolveTarget 解析目标（别名 → 目标字段），并按 servers.csv 单行 + config defaults 合并。
+// 所有未显式指定跳板的目标都直连；要走跳板必须在 jump 列或命令行 -j/-J 指定。
 //
 // 合并顺序：调用方后续再叠加命令行 flag（flag > 单行 > defaults）。
 func (c *Config) ResolveTarget(name string) (*Target, *JumpConfig, error) {
@@ -439,12 +445,14 @@ func (c *Config) ResolveTarget(name string) (*Target, *JumpConfig, error) {
 
 	if e := c.findServer(name); e != nil {
 		tg.IDOrIP = e.Target
+		tg.Port = e.Port
+		tg.PortExplicit = e.Port > 0
 		tg.SuUser = e.SuUser
 		tg.NoSu = e.NoSu
 		tg.Note = e.Note
 		tg.JumpAlias = e.Jump
 		tg.NoJump = e.NoJump
-		tg.Source = fmt.Sprintf("servers.txt 第 %d 行", e.Line)
+		tg.Source = fmt.Sprintf("servers.csv 第 %d 行", e.Line)
 	} else if c.hasAlias(name) {
 		a := c.Aliases[name]
 		tg.IDOrIP = a.Target
@@ -456,12 +464,9 @@ func (c *Config) ResolveTarget(name string) (*Target, *JumpConfig, error) {
 		tg.Source = "config.yaml 的 aliases 段"
 	} else {
 		tg.IDOrIP = name
+		// 未入清单的临时目标（通常是裸 IP）默认直连；要走跳板请显式 -j / -J。
+		tg.NoJump = true
 		tg.Source = "命令行参数"
-	}
-
-	// 跳板列留空 = 用 defaults.jump；跳板列写 "-" = 强制直连（NoJump）。
-	if !tg.NoJump && tg.JumpAlias == "" {
-		tg.JumpAlias = strings.TrimSpace(c.Defaults.Jump)
 	}
 
 	jump, err := c.ResolveJump(tg.JumpAlias)

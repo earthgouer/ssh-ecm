@@ -37,34 +37,46 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	return login(target, remoteCmd)
 }
 
-// login 完成一次完整流程：解析 → 调 ECM → (查询 / 登录)。
-func login(targetName, remoteCmd string) error {
+// connInfo 是解析并查询 ECM 后的连接信息。
+type connInfo struct {
+	cfg      *config.Config
+	target   *config.Target
+	jump     *config.JumpConfig
+	server   *ecm.ServerInfo
+	ip       string
+	port     int
+	suUser   string
+	jumpDesc string
+}
+
+// resolveConn 完成配置加载、目标解析、ECM 查询和端口/跳板计算，但不建立 SSH 连接。
+func resolveConn(targetName string) (*connInfo, error) {
 	cfg, err := config.Load("")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := cfg.LoadServersInto(); err != nil {
-		return err
+		return nil, err
 	}
 
 	tg, jump, err := cfg.ResolveTarget(targetName)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := applyFlags(cfg, tg, &jump); err != nil {
-		return err
+		return nil, err
 	}
 
 	client, err := ecm.NewClient(cfg.API)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if flagVerbose {
 		fmt.Fprintf(os.Stderr, "[verbose] 目标：%s（%s）\n", tg.Alias, tg.IDOrIP)
 	}
 	info, err := queryServer(client, tg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	ip := strings.TrimSpace(info.IP)
@@ -75,13 +87,7 @@ func login(targetName, remoteCmd string) error {
 	}
 	jumpDesc := describeJump(jump)
 
-	if flagInfo {
-		if err := printInfo(cfg.API, tg, info, ip, port, suUser, jumpDesc); err != nil {
-			return err
-		}
-		return nil
-	}
-	if flagVerbose {
+	if flagVerbose && !flagInfo {
 		fmt.Fprintf(os.Stderr, "[verbose] IP：%s  端口：%d  用户：root\n", ip, port)
 		fmt.Fprintf(os.Stderr, "[verbose] 跳板：%s\n", jumpDesc)
 		if suUser != "" {
@@ -90,12 +96,38 @@ func login(targetName, remoteCmd string) error {
 		fmt.Fprintf(os.Stderr, "[verbose] 认证：密码（来自 ECM，不显示）\n")
 	}
 
-	sshClient, err := sshx.Dial(&sshx.Target{
+	return &connInfo{
+		cfg:      cfg,
+		target:   tg,
+		jump:     jump,
+		server:   info,
+		ip:       ip,
+		port:     port,
+		suUser:   suUser,
+		jumpDesc: jumpDesc,
+	}, nil
+}
+
+func (c *connInfo) dial() (*ssh.Client, error) {
+	return sshx.Dial(&sshx.Target{
 		User:     "root",
-		IP:       ip,
-		Port:     port,
-		Password: info.Password,
-	}, toSSHJump(jump), flagTimeout)
+		IP:       c.ip,
+		Port:     c.port,
+		Password: c.server.Password,
+	}, toSSHJump(c.jump), flagTimeout)
+}
+
+// login 完成一次完整流程：解析 → 调 ECM → (查询 / 登录)。
+func login(targetName, remoteCmd string) error {
+	ci, err := resolveConn(targetName)
+	if err != nil {
+		return err
+	}
+	if flagInfo {
+		return printInfo(ci.cfg.API, ci.target, ci.server, ci.ip, ci.port, ci.suUser, ci.jumpDesc)
+	}
+
+	sshClient, err := ci.dial()
 	if err != nil {
 		return err
 	}
@@ -113,8 +145,8 @@ func login(targetName, remoteCmd string) error {
 	}
 
 	initCmds := ""
-	if suUser != "" {
-		initCmds = "su - " + suUser + "\n"
+	if ci.suUser != "" {
+		initCmds = "su - " + ci.suUser + "\n"
 	}
 	if err := sshterm.RunInteractive(sshClient, initCmds); err != nil {
 		var exitErr *ssh.ExitError
@@ -144,7 +176,7 @@ func queryServer(client ecm.Client, tg *config.Target) (*ecm.ServerInfo, error) 
 	return info, nil
 }
 
-// applyFlags 用命令行 flag 覆盖 servers.txt / config.yaml 的解析结果。
+// applyFlags 用命令行 flag 覆盖 servers.csv / config.yaml 的解析结果。
 func applyFlags(cfg *config.Config, tg *config.Target, jump **config.JumpConfig) error {
 	if flagPort > 0 {
 		tg.Port = flagPort
@@ -163,12 +195,9 @@ func applyFlags(cfg *config.Config, tg *config.Target, jump **config.JumpConfig)
 		*jump = j
 		tg.NoJump = false
 	case flagJump != "":
-		alias := flagJump
-		if alias == jumpBare {
-			alias = strings.TrimSpace(cfg.Defaults.Jump)
-			if alias == "" {
-				return fmt.Errorf("-j 需要用默认跳板机，但 %s 里没有配置 defaults.jump", config.ConfigPath())
-			}
+		alias := strings.TrimSpace(flagJump)
+		if alias == "" {
+			return fmt.Errorf("-j 需要指定跳板别名（例如 -j bastion）")
 		}
 		j, err := cfg.ResolveJump(alias)
 		if err != nil {
@@ -187,6 +216,10 @@ func applyFlags(cfg *config.Config, tg *config.Target, jump **config.JumpConfig)
 func resolvePort(cfg *config.Config, tg *config.Target, info *ecm.ServerInfo) int {
 	if flagPort > 0 {
 		return flagPort
+	}
+	// servers.csv 里显式写的 port 优先于 ECM 返回值；别名配置仍保持 ECM 优先。
+	if tg.PortExplicit && tg.Port > 0 {
+		return tg.Port
 	}
 	port := tg.Port
 	if info != nil && info.Port > 0 {
@@ -242,7 +275,7 @@ func toSSHJump(j *config.JumpConfig) *sshx.Jump {
 	if j == nil {
 		return nil
 	}
-	return &sshx.Jump{Name: j.Name, Host: j.Host, Port: j.Port, User: j.User, Key: j.Key}
+	return &sshx.Jump{Name: j.Name, Host: j.Host, Port: j.Port, User: j.User, Key: j.Key, PasswordEnv: j.PasswordEnv}
 }
 
 func describeJump(j *config.JumpConfig) string {
@@ -348,11 +381,11 @@ func selectAndLogin() error {
 		return err
 	}
 	if len(cfg.Servers) == 0 {
-		return fmt.Errorf("%s 里还没有服务器，请执行 ssh-ecm edit 添加（格式：别名<Tab>目标[<Tab>su用户<Tab>跳板<Tab>备注]）",
+		return fmt.Errorf("%s 里还没有服务器，请执行 ssh-ecm edit 添加（CSV 表头：alias,target,su,jump,port,note,tags）",
 			config.ServersPath())
 	}
 
-	alias, err := pickServer(cfg, cfg.Servers)
+	alias, err := pickServer(cfg.Servers)
 	if err != nil {
 		return err
 	}

@@ -12,7 +12,6 @@ import (
 // render 在非终端下会退化为 100x24 的默认尺寸，输出是确定的，可以直接断言。
 func newTestPicker(buf *bytes.Buffer, entries ...config.ServerEntry) *serverPicker {
 	p := &serverPicker{
-		cfg: &config.Config{},
 		all: entries,
 		out: bufio.NewWriter(buf),
 	}
@@ -32,7 +31,7 @@ func TestRenderNormal(t *testing.T) {
 	p.out.Flush()
 
 	got := buf.String()
-	for _, want := range []string{"选择服务器", "共 2 台", "> db1", "第 2/2 台", "/ 过滤"} {
+	for _, want := range []string{"选择服务器", "共 2 台", "别名", "目标", "跳板", "> db1", "第 2/2 台", "/ 过滤"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("输出缺少 %q：\n%s", want, got)
 		}

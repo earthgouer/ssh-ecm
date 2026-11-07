@@ -75,10 +75,9 @@ func TestTailFitWidth(t *testing.T) {
 
 func TestServerPickerFilter(t *testing.T) {
 	p := &serverPicker{
-		cfg: &config.Config{},
 		all: []config.ServerEntry{
 			{Alias: "web1", Target: "10.20.30.40", SuUser: "app", Note: "生产 web 前端"},
-			{Alias: "db1", Target: "db-01", Note: "数据库"},
+			{Alias: "db1", Target: "db-01", Note: "数据库", Tags: []string{"mysql", "prod"}},
 			{Alias: "app01", Target: "app-01", Jump: "bastion", Note: "应用服务器 A"},
 		},
 	}
@@ -95,6 +94,7 @@ func TestServerPickerFilter(t *testing.T) {
 		{"WEB", "web1"},      // 大小写不敏感，命中别名
 		{"库", "db1"},         // 中文命中备注
 		{"bastion", "app01"}, // 命中跳板列
+		{"mysql", "db1"},     // 命中标签
 		{"10.20", "web1"},    // 命中目标
 		{"zzz", ""},
 	}

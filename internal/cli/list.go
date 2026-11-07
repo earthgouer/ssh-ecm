@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -15,11 +16,10 @@ import (
 func newListCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
-		Short: "列出 servers.txt 中的全部服务器",
+		Short: "列出 servers.csv 中的全部服务器",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load("")
-			if err != nil {
+			if _, err := config.Load(""); err != nil {
 				return err
 			}
 			entries, err := config.LoadServers(config.ServersPath())
@@ -32,28 +32,27 @@ func newListCmd() *cobra.Command {
 			}
 
 			tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-			fmt.Fprintln(tw, "别名\t目标\tsu 用户\t跳板\t备注")
+			fmt.Fprintln(tw, "别名\t目标\tsu 用户\t跳板\t端口\t备注\t标签")
 			for _, e := range entries {
 				su := "-"
 				if e.SuUser != "" && !e.NoSu {
 					su = e.SuUser
 				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-					e.Alias, e.Target, su, jumpColumn(cfg, e), noteOrDash(e.Note))
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+					e.Alias, e.Target, su, jumpColumn(e),
+					portOrDash(e.Port), noteOrDash(e.Note), tagsOrDash(e.TagsText()))
 			}
 			return tw.Flush()
 		},
 	}
 }
 
-func jumpColumn(cfg *config.Config, e config.ServerEntry) string {
+func jumpColumn(e config.ServerEntry) string {
 	switch {
 	case e.NoJump:
 		return "直连(-)"
 	case e.Jump != "":
 		return e.Jump
-	case cfg.Defaults.Jump != "":
-		return "(默认) " + cfg.Defaults.Jump
 	default:
 		return "直连"
 	}
@@ -66,10 +65,24 @@ func noteOrDash(s string) string {
 	return s
 }
 
+func portOrDash(p int) string {
+	if p <= 0 {
+		return "-"
+	}
+	return strconv.Itoa(p)
+}
+
+func tagsOrDash(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "-"
+	}
+	return s
+}
+
 func newEditCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "edit",
-		Short: "用 $EDITOR（默认 vi）编辑 servers.txt",
+		Short: "用 $EDITOR（默认 vi）编辑 servers.csv",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := config.EnsureServersFile(); err != nil {

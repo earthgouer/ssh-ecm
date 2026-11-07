@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -85,5 +87,21 @@ func TestAPIValidateErrors(t *testing.T) {
 		if !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s：错误信息应含 %q，实际 %v", tc.name, tc.want, err)
 		}
+	}
+}
+
+func TestJumpPasswordEnvParsed(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(EnvConfigDir, dir)
+	cfgYAML := "api:\n  url: http://127.0.0.1:9\njumps:\n  bastion:\n    host: 10.10.0.1\n    password_env: BASTION_PASSWORD\n"
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(cfgYAML), 0o600); err != nil {
+		t.Fatalf("写配置失败：%v", err)
+	}
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("加载配置失败：%v", err)
+	}
+	if got := cfg.Jumps["bastion"].PasswordEnv; got != "BASTION_PASSWORD" {
+		t.Fatalf("password_env 得到 %q", got)
 	}
 }

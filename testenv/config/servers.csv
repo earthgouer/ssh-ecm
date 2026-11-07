@@ -1,0 +1,7 @@
+﻿# 本地测试清单（CSV 带表头）
+alias,target,su,jump,port,note,tags
+web1,172.28.0.10,,-,22,直连测试机,test;direct
+web2,172.28.0.10,,bastion,22,显式跳板测试机,test;jump
+web3,172.28.0.10,,,22,空跳板列直连,test;direct
+db1,172.28.0.10,,bastion,22,显式跳板测试机,test;jump
+app1,172.28.0.10,app,-,22,登录后 su - app,test;su

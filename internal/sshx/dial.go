@@ -35,6 +35,8 @@ type Jump struct {
 	Port int
 	User string
 	Key  string
+	// PasswordEnv 是跳板机密码所在的环境变量名；为空时走终端提示。
+	PasswordEnv string
 }
 
 // Dial 建立 SSH 连接。jump 为 nil 时直连。
@@ -86,7 +88,7 @@ func Dial(target *Target, jump *Jump, timeout time.Duration) (*ssh.Client, error
 	}
 	jclient, err := ssh.Dial("tcp", jumpAddr, jumpCfg)
 	if err != nil {
-		return nil, fmt.Errorf("跳板机 %s 连接失败：%w", jumpAddr, explainDialError(jumpAddr, err))
+		return nil, explainJumpDialError(jumpAddr, err)
 	}
 
 	type dialResult struct {
@@ -118,8 +120,30 @@ func Dial(target *Target, jump *Jump, timeout time.Duration) (*ssh.Client, error
 	}
 }
 
-// jumpAuth 组装跳板机认证方式：ssh-agent + 私钥文件。
+// jumpAuth 组装跳板机认证方式：公钥优先（ssh-agent + 私钥文件），
+// 公钥用不上时回退到密码（password_env 或终端提示），并兼容 keyboard-interactive。
 func jumpAuth(jump *Jump) ([]ssh.AuthMethod, error) {
+	methods, loadErrs := jumpKeyMethods(jump)
+
+	pw := &jumpPassword{jump: jump}
+	if len(methods) == 0 && !pw.available() {
+		if len(loadErrs) > 0 {
+			return nil, fmt.Errorf("加载跳板机私钥失败：%s", strings.Join(loadErrs, "；"))
+		}
+		return nil, fmt.Errorf("没有可用于登录跳板机 %s 的 SSH 密钥，也无法交互输入密码："+
+			"请把公钥加入跳板机 authorized_keys，或配置 jumps.<别名>.password_env / 在终端下重试", jump.Host)
+	}
+
+	// 这两个方法只在服务器要求密码认证时才会被调用，公钥能过就不会打扰用户。
+	methods = append(methods,
+		ssh.KeyboardInteractive(pw.answer),
+		ssh.PasswordCallback(pw.get),
+	)
+	return methods, nil
+}
+
+// jumpKeyMethods 收集公钥认证方式；没有任何可用方式时返回空切片与加载错误。
+func jumpKeyMethods(jump *Jump) ([]ssh.AuthMethod, []string) {
 	var methods []ssh.AuthMethod
 
 	if sock := strings.TrimSpace(os.Getenv("SSH_AUTH_SOCK")); sock != "" {
@@ -169,15 +193,7 @@ func jumpAuth(jump *Jump) ([]ssh.AuthMethod, error) {
 		}
 		methods = append(methods, ssh.PublicKeys(signer))
 	}
-
-	if len(methods) == 0 {
-		msg := fmt.Sprintf("没有可用于登录跳板机 %s 的 SSH 密钥：请确认 ~/.ssh/id_rsa 存在免密，或启动 ssh-agent", jump.Host)
-		if len(loadErrs) > 0 {
-			msg = fmt.Sprintf("加载跳板机私钥失败：%s", strings.Join(loadErrs, "；"))
-		}
-		return nil, errors.New(msg)
-	}
-	return methods, nil
+	return methods, loadErrs
 }
 
 // tofuCallback 返回 TOFU 校验函数：未知主机记录到专用 known_hosts，指纹变更直接拒绝。
@@ -234,31 +250,48 @@ func tofuCallback(path string) (ssh.HostKeyCallback, error) {
 	}, nil
 }
 
-// explainDialError 把底层错误翻译成人话。
+// explainDialError 把目标机的底层错误翻译成人话。
 func explainDialError(addr string, err error) error {
+	return explainDialErrorAs(addr, err, false)
+}
+
+// explainJumpDialError 是跳板机专用版本：认证失败时提示检查 user/key/密码，而不是 ECM 密码。
+func explainJumpDialError(addr string, err error) error {
+	return explainDialErrorAs(addr, err, true)
+}
+
+func explainDialErrorAs(addr string, err error, jump bool) error {
 	if err == nil {
 		return nil
 	}
+	prefix := "连接 "
+	if jump {
+		prefix = "连接跳板机 "
+	}
 	var nerr net.Error
 	if errors.As(err, &nerr) && nerr.Timeout() {
-		return fmt.Errorf("连接 %s 超时（网络不通、目标机未开机或防火墙拦截）", addr)
+		return fmt.Errorf("%s%s 超时（网络不通、目标机未开机或防火墙拦截）", prefix, addr)
 	}
 	msg := err.Error()
 	switch {
 	case strings.Contains(msg, "unable to authenticate"),
 		strings.Contains(msg, "no supported methods remain"),
 		strings.Contains(msg, "permission denied"):
-		return fmt.Errorf("连接 %s 认证失败：请确认 ECM 返回的 root 密码正确，且目标机允许密码登录", addr)
+		if jump {
+			return fmt.Errorf("%s%s 认证失败：请确认 jumps 里的 user 是否正确、ssh-agent / ~/.ssh 里有该跳板机认可的私钥；"+
+				"若该账号只允许密码登录，可配置 password_env 或在终端下重试", prefix, addr)
+		}
+		return fmt.Errorf("%s%s 认证失败：请确认 ECM 返回的 root 密码正确，且目标机允许密码登录", prefix, addr)
 	case strings.Contains(msg, "connection refused"):
-		return fmt.Errorf("连接 %s 被拒绝：端口不通或 sshd 未启动", addr)
+		return fmt.Errorf("%s%s 被拒绝：端口不通或 sshd 未启动", prefix, addr)
 	case strings.Contains(msg, "no route to host"):
-		return fmt.Errorf("连接 %s 失败：没有到主机的路由（检查网络或跳板机）", addr)
+		return fmt.Errorf("%s%s 失败：没有到主机的路由（检查网络或跳板机）", prefix, addr)
 	case strings.Contains(msg, "i/o timeout"), strings.Contains(msg, "deadline exceeded"):
-		return fmt.Errorf("连接 %s 超时（网络不通、目标机未开机或防火墙拦截）", addr)
+		return fmt.Errorf("%s%s 超时（网络不通、目标机未开机或防火墙拦截）", prefix, addr)
 	case strings.Contains(msg, "known_hosts"), strings.Contains(msg, "密钥与"):
 		return err // TOFU 回调已给出中文说明
 	}
-	return fmt.Errorf("连接 %s 失败：%w", addr, err)
+	return fmt.Errorf("%s%s 失败：%w", prefix, addr, err)
 }
 
 func expandHome(p string) string {

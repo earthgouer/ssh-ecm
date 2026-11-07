@@ -1,0 +1,12 @@
+# 仅供本地测试：允许 root 密码登录与 TCP 转发（跳板机需要）
+Port 22
+ListenAddress 0.0.0.0
+HostKey /etc/ssh/ssh_host_rsa_key
+HostKey /etc/ssh/ssh_host_ed25519_key
+PermitRootLogin yes
+PasswordAuthentication yes
+KbdInteractiveAuthentication yes
+UsePAM no
+AllowTcpForwarding yes
+Subsystem sftp internal-sftp
+PidFile /run/sshd.pid
